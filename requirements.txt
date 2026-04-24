@@ -5,3 +5,6 @@ langgraph>=0.1.0
 python-dotenv>=1.0.1
 langchain-openai>=0.1.0
 langchain-google-genai>=1.0.0
+langchain-mcp-adapters
+fastmcp
+mcp

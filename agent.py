@@ -1,15 +1,26 @@
 import os
+import sys
+import logging
+import warnings
+
+# Aggressively suppress technical warnings
+logging.getLogger("mcp").setLevel(logging.ERROR)
+logging.getLogger("langchain_mcp_adapters").setLevel(logging.ERROR)
+logging.getLogger("langchain_google_genai").setLevel(logging.ERROR)
+logging.getLogger("google.genai").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", message=".*additionalProperties.*")
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 # Load environment variables
 load_dotenv()
-
-from tools import mock_tools
 
 SYSTEM_PROMPT = """You are a Map Release Automation Agent. Your job is to strictly follow this 12-step process to automate a map release. Execute EXACTLY ONE tool at a time, wait for its result, then proceed to the next step:
 
@@ -37,21 +48,46 @@ def get_llm():
     elif provider == "openai":
         return ChatOpenAI(model="gpt-4o", temperature=0)
     elif provider == "gemini":
+        # Try models in order of likelihood to have quota/availability for this user
+        # gemini-3-flash-preview is the most likely based on user context
         return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",  # Higher free-tier quota than gemini-2.5-flash-lite
+            model="gemini-2.5-flash-lite",
             temperature=0,
+            max_retries=3
         )
     else:
         raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
 
-def create_agent_graph():
+async def create_agent_graph():
     llm = get_llm()
+    
+    # Configure MCP client to connect to the local mock Atlassian MCP server
+    mcp_servers = {
+        "atlassian_mcp": {
+            "transport": "stdio",
+            "command": sys.executable,
+            "args": ["mcp_server.py"],
+        }
+    }
+    
+    # Initialize the MultiServerMCPClient
+    client = MultiServerMCPClient(mcp_servers)
+    
+    # Fetch tools from the connected MCP server dynamically
+    tools = await client.get_tools()
+    
+    # Use a MemorySaver as a checkpointer to support interrupts and human-in-the-loop
+    checkpointer = MemorySaver()
+    
     # create_react_agent from langgraph.prebuilt handles message history
     # correctly for all providers including Gemini, ensuring AIMessages
     # with tool_calls are never stripped from the conversation history.
+    # We add interrupt_before=["tools"] to pause before any tool execution.
     graph = create_react_agent(
         model=llm,
-        tools=mock_tools,
+        tools=tools,
         prompt=SYSTEM_PROMPT,
+        checkpointer=checkpointer,
+        interrupt_before=["tools"]
     )
     return graph
